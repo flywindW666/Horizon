@@ -1,0 +1,29 @@
+services:
+  horizon-web:
+    image: ghcr.io/flywindw666/horizon:latest
+    # image: ryantj/horizon:latest
+    container_name: horizon-web
+    init: true
+    user: "10001:10001"
+    entrypoint: ["/app/.venv/bin/python", "-m", "src.web"]
+    ports:
+      - "${HORIZON_BIND_ADDRESS:-127.0.0.1}:${HORIZON_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      HORIZON_DATA_DIR: /app/data
+      HORIZON_WEB_USER: "${HORIZON_WEB_USER:-admin}"
+      HORIZON_WEB_PASSWORD: "${HORIZON_WEB_PASSWORD:?Set a password of at least 16 characters in .env}"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
