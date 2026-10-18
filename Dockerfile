@@ -41,5 +41,5 @@ ENV PYTHONUNBUFFERED=1
 USER horizon
 
 # Run the application
-ENTRYPOINT ["uv", "run", "horizon"]
+ENTRYPOINT ["/app/.venv/bin/horizon"]
 CMD []
