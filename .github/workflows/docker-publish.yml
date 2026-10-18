@@ -1,0 +1,131 @@
+name: Sync upstream and publish Docker
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - profiles/**
+      - data/config.example.json
+      - data/presets.json
+      - .github/workflows/docker-publish.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: horizon-docker-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.sync.outputs.revision }}
+      publish: ${{ steps.sync.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream without discarding fork changes
+        id: sync
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          before=$(git rev-parse HEAD)
+          if [ "$EVENT" != push ]; then
+            git fetch https://github.com/Thysrael/Horizon.git main
+            if ! git merge --no-edit FETCH_HEAD; then
+              git merge --abort
+              echo 'Upstream merge conflict; resolve manually. No image will be published.' >&2
+              exit 1
+            fi
+            if [ "$(git rev-parse HEAD)" != "$before" ]; then
+              git push origin HEAD:main
+            fi
+          fi
+          revision=$(git rev-parse HEAD)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = schedule ] && [ "$revision" = "$before" ]; then
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: sync
+    if: needs.sync.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.revision }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+      - run: uv sync --frozen --extra dev
+      - run: uv run --no-sync pytest -o addopts='' -q
+      - run: docker build -t horizon:smoke .
+      - name: Offline startup and packaged resources
+        run: |
+          docker run --rm --network none horizon:smoke --help
+          docker run --rm --network none --entrypoint /app/.venv/bin/python horizon:smoke -c 'import os; from pathlib import Path; from src.processing.profiles import ProfileRegistry; assert os.getuid() != 0; assert ProfileRegistry.load(Path("/app/profiles"), "tech-news").get("tech-news").id == "tech-news"'
+
+  publish:
+    needs: [sync, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.revision }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push amd64 and arm64
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/flywindw666/horizon:latest
+            ghcr.io/flywindw666/horizon:sha-${{ needs.sync.outputs.revision }}
+            docker.io/ryantj/horizon:latest
+            docker.io/ryantj/horizon:sha-${{ needs.sync.outputs.revision }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/flywindW666/Horizon
+            org.opencontainers.image.revision=${{ needs.sync.outputs.revision }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify published manifests
+        env:
+          REVISION: ${{ needs.sync.outputs.revision }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "ghcr.io/flywindw666/horizon:sha-$REVISION"
+          docker buildx imagetools inspect "docker.io/ryantj/horizon:sha-$REVISION"
