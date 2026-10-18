@@ -15,6 +15,8 @@ on:
       - profiles/**
       - data/config.example.json
       - data/presets.json
+      - tests/**
+      - compose.web.yaml
       - .github/workflows/docker-publish.yml
 
 permissions:
@@ -122,6 +124,32 @@ jobs:
             org.opencontainers.image.revision=${{ needs.sync.outputs.revision }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test the published web dashboard
+        env:
+          REVISION: ${{ needs.sync.outputs.revision }}
+          SMOKE_PASSWORD: smoke-test-password-long-enough
+        run: |
+          set -euo pipefail
+          docker rm -f horizon-web-smoke || true
+          docker pull "ghcr.io/flywindw666/horizon:sha-$REVISION"
+          docker run -d --name horizon-web-smoke \
+            --entrypoint /app/.venv/bin/python \
+            -e HORIZON_WEB_USER=admin \
+            -e HORIZON_WEB_PASSWORD=$SMOKE_PASSWORD \
+            -e HORIZON_DATA_DIR=/tmp/horizon-smoke \
+            -p 18080:8080 \
+            "ghcr.io/flywindw666/horizon:sha-$REVISION" -m src.web
+          for i in {1..30}; do
+            if curl --silent --fail "http://127.0.0.1:18080/api/status" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --user admin:$SMOKE_PASSWORD "http://127.0.0.1:18080/api/status")
+          test "$code" = "200" || { echo "Smoke test expected 200, got $code"; exit 1; }
+          code=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:18080/api/status")
+          test "$code" = "401" || { echo "Unauthenticated expected 401, got $code"; exit 1; }
+          docker rm -f horizon-web-smoke >/dev/null
       - name: Verify published manifests
         env:
           REVISION: ${{ needs.sync.outputs.revision }}
