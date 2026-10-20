@@ -339,6 +339,7 @@ Horizon is an open-source project maintained in spare time. If you'd like to sup
 | [Scrapers](docs/scrapers.md) | Source scraper details and extension notes |
 | [Extractors](docs/extractors.md) | Full article extraction for RSS sources |
 | [MCP Tools](src/mcp/README.md) | Tool reference for MCP-compatible clients |
+| [Agent Skill](docs/agent-skill.md) | Use an AI assistant to configure, run, customize, schedule, and extend Horizon |
 
 ## Project Status
 

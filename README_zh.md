@@ -318,6 +318,7 @@ Horizon 支持通过多种方式发布和分发生成的日报：
 | [抓取器](docs/scrapers.md) | 信息源抓取器说明和扩展细节 |
 | [内容提取器](docs/extractors.md) | RSS 信息源的全文提取 |
 | [MCP 工具](src/mcp/README.md) | MCP 客户端可调用的工具说明 |
+| [Agent Skill](docs/agent-skill.md) | 让 AI 助手配置、运行、定制、定时投递和扩展 Horizon |
 
 ## 项目状态
 

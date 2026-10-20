@@ -335,6 +335,7 @@ Horizonは余暇に運営されているオープンソースプロジェクト�
 | [スクレイパー](docs/scrapers.md) | 情報源スクレイパーの詳細と拡張に関する注記 |
 | [コンテンツエクストラクター](docs/extractors.md) | RSS情報源の全文抽出 |
 | [MCPツール](src/mcp/README.md) | MCP互換クライアント向けのツールリファレンス |
+| [Agent Skill](docs/agent-skill.md) | AIアシスタントによるHorizonの設定、実行、カスタマイズ、定期配信、拡張 |
 
 ## プロジェクトの状況
 
