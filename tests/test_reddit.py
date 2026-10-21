@@ -153,7 +153,7 @@ def test_reddit_comment_403_degrades_to_post_without_comments():
     client = httpx.AsyncClient(transport=transport)
     scraper = RedditScraper(_make_config(fetch_comments=3), client)
 
-    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1)))
+    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1))).items
     asyncio.run(client.aclose())
 
     assert len(items) == 1
@@ -176,7 +176,7 @@ def test_reddit_listing_uses_old_reddit_first():
         _make_config(fetch_comments=0, profile="subreddit-profile"), client
     )
 
-    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1)))
+    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1))).items
     asyncio.run(client.aclose())
 
     assert [str(request.url.host) for request in requests] == ["old.reddit.com"]
@@ -223,7 +223,7 @@ def test_reddit_listing_old_failure_falls_back_to_json_then_rss():
         _make_config(fetch_comments=3, profile="rss-profile"), client
     )
 
-    items = asyncio.run(scraper.fetch(datetime(2029, 12, 31, tzinfo=timezone.utc)))
+    items = asyncio.run(scraper.fetch(datetime(2029, 12, 31, tzinfo=timezone.utc))).items
     asyncio.run(client.aclose())
 
     assert [request.url.path for request in requests] == [
@@ -252,7 +252,7 @@ def test_reddit_user_profile_propagates() -> None:
 
     items = asyncio.run(
         scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1))
-    )
+    ).items
 
     assert len(items) == 1
     assert items[0].profile == "user-profile"
@@ -273,7 +273,7 @@ def test_reddit_comments_use_old_reddit_first():
     client = httpx.AsyncClient(transport=transport)
     scraper = RedditScraper(_make_config(fetch_comments=2), client)
 
-    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1)))
+    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1))).items
     asyncio.run(client.aclose())
 
     assert [str(request.url.host) for request in requests] == [
@@ -307,7 +307,7 @@ def test_reddit_subreddits_are_fetched_sequentially():
     client = httpx.AsyncClient(transport=transport)
     scraper = RedditScraper(_make_two_subreddit_config(fetch_comments=0), client)
 
-    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1)))
+    items = asyncio.run(scraper.fetch(datetime.now(timezone.utc) - timedelta(hours=1))).items
     asyncio.run(client.aclose())
 
     assert requests == ["/r/LocalLLaMA/hot/", "/r/MachineLearning/hot/"]

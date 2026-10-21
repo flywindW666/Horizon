@@ -18,7 +18,6 @@ from ..models import ContentAnalysis, ContentItem
 from ..processing.content import select_content, split_content
 from ..processing.profiles import ProfileRegistry
 
-DEFAULT_THROTTLE_SEC = 0.0
 
 class ContentAnalyzer:
     """Analyzes content items using AI to determine importance."""
@@ -28,11 +27,16 @@ class ContentAnalyzer:
         ai_client: AIClient,
         profiles: ProfileRegistry,
         console: Optional[Console] = None,
+        *,
+        concurrency: int = 1,
+        throttle_sec: float = 0.0,
     ):
         self.client = ai_client
         self.profiles = profiles
         self.classifier = ContentClassifier(ai_client, profiles)
         self.console = console or Console(stderr=True)
+        self.concurrency = max(concurrency, 1)
+        self.throttle_sec = max(throttle_sec, 0.0)
 
     @staticmethod
     def _parse_json_response(response: str) -> Optional[dict]:
@@ -42,22 +46,8 @@ class ContentAnalyzer:
         """
         return parse_json_response(response)
 
-    def _get_throttle_sec(self) -> float:
-        """Return the configured inter-item throttle, clamped to zero or above."""
-        config = getattr(self.client, "config", None)
-        throttle_sec = getattr(config, "throttle_sec", DEFAULT_THROTTLE_SEC)
-        return max(throttle_sec, 0.0)
-
-    def _get_concurrency(self) -> int:
-        """Return the configured analysis concurrency, clamped to 1 or above."""
-        config = getattr(self.client, "config", None)
-        concurrency = getattr(config, "analysis_concurrency", 1)
-        return max(concurrency, 1)
-
     async def analyze_batch(self, items: List[ContentItem]) -> List[ContentItem]:
-        throttle_sec = self._get_throttle_sec()
-        concurrency = self._get_concurrency()
-        semaphore = asyncio.Semaphore(concurrency)
+        semaphore = asyncio.Semaphore(self.concurrency)
 
         async def _process(item: ContentItem, index: int, progress_task) -> ContentItem:
             async with semaphore:
@@ -71,8 +61,8 @@ class ContentAnalyzer:
                             reason="Analysis failed",
                             summary=item.title,
                         )
-                if throttle_sec > 0 and index < len(items) - 1:
-                    await asyncio.sleep(throttle_sec)
+                if self.throttle_sec > 0 and index < len(items) - 1:
+                    await asyncio.sleep(self.throttle_sec)
             progress.advance(progress_task)
             return item
 

@@ -159,29 +159,30 @@ def test_fetch_items_uses_public_orchestrator_api(tmp_path: Path, monkeypatch) -
             SimpleNamespace(
                 horizon_path=tmp_path,
                 config_path=config_path,
-                runtime=SimpleNamespace(),
                 config=SimpleNamespace(),
             ),
             ["rss"],
             [],
         ),
     )
-    monkeypatch.setattr("src.mcp.service.make_storage", lambda runtime, config_path: object())
+    monkeypatch.setattr("src.mcp.service.make_storage", lambda config_path: object())
 
     class FakeOrchestrator:
+        last_fetch_report = None
+
         async def fetch_all_sources(self, since):  # type: ignore[no-untyped-def]
             return [make_item("item-1"), make_item("item-2")]
 
         def merge_cross_source_duplicates(self, items):  # type: ignore[no-untyped-def]
             return items[:1]
 
-    def build_orchestrator(runtime, config, storage, console, profiles):  # type: ignore[no-untyped-def]
+    def build_orchestrator(config, storage, console, profiles):  # type: ignore[no-untyped-def]
         assert console is service.console
         assert profiles is PROFILES
         return FakeOrchestrator()
 
     monkeypatch.setattr(
-        "src.mcp.service.make_orchestrator",
+        "src.mcp.service.HorizonOrchestrator",
         build_orchestrator,
     )
 
@@ -206,14 +207,13 @@ def test_fetch_items_includes_fetch_report_in_response_and_metadata(
             SimpleNamespace(
                 horizon_path=tmp_path,
                 config_path=config_path,
-                runtime=SimpleNamespace(),
                 config=SimpleNamespace(),
             ),
             ["rss", "github"],
             [],
         ),
     )
-    monkeypatch.setattr("src.mcp.service.make_storage", lambda runtime, config_path: object())
+    monkeypatch.setattr("src.mcp.service.make_storage", lambda config_path: object())
 
     class FakeOrchestrator:
         last_fetch_report = FetchReport(
@@ -230,8 +230,8 @@ def test_fetch_items_includes_fetch_report_in_response_and_metadata(
             return items
 
     monkeypatch.setattr(
-        "src.mcp.service.make_orchestrator",
-        lambda runtime, config, storage, console, profiles: FakeOrchestrator(),
+        "src.mcp.service.HorizonOrchestrator",
+        lambda config, storage, console, profiles: FakeOrchestrator(),
     )
 
     result = asyncio.run(service.fetch_items(hours=6))
@@ -254,13 +254,12 @@ def test_filter_items_uses_public_filtering_pipeline_api(tmp_path: Path, monkeyp
         lambda **kwargs: (
             [make_item("item-1", score=9.0), make_item("item-2", score=8.0)],
             SimpleNamespace(
-                runtime=SimpleNamespace(),
                 config_path=tmp_path / "config.json",
                 config=SimpleNamespace(digest=SimpleNamespace()),
             ),
         ),
     )
-    monkeypatch.setattr("src.mcp.service.make_storage", lambda runtime, config_path: object())
+    monkeypatch.setattr("src.mcp.service.make_storage", lambda config_path: object())
 
     class FakeOrchestrator:
         async def select_digest_items(self, items, **kwargs):  # type: ignore[no-untyped-def]
@@ -276,8 +275,8 @@ def test_filter_items_uses_public_filtering_pipeline_api(tmp_path: Path, monkeyp
             )
 
     monkeypatch.setattr(
-        "src.mcp.service.make_orchestrator",
-        lambda runtime, config, storage, console, profiles: FakeOrchestrator(),
+        "src.mcp.service.HorizonOrchestrator",
+        lambda config, storage, console, profiles: FakeOrchestrator(),
     )
 
     result = asyncio.run(service.filter_items(run_id="run-topic-dedup", topic_dedup=True))
@@ -302,13 +301,12 @@ def test_filter_items_applies_balanced_digest(tmp_path: Path, monkeypatch) -> No
         lambda **kwargs: (
             [make_item("item-1", score=9.0), make_item("item-2", score=8.0)],
             SimpleNamespace(
-                runtime=SimpleNamespace(),
                 config_path=tmp_path / "config.json",
                 config=SimpleNamespace(digest=filtering),
             ),
         ),
     )
-    monkeypatch.setattr("src.mcp.service.make_storage", lambda runtime, config_path: object())
+    monkeypatch.setattr("src.mcp.service.make_storage", lambda config_path: object())
 
     class FakeOrchestrator:
         async def select_digest_items(self, items, **kwargs):  # type: ignore[no-untyped-def]
@@ -328,8 +326,8 @@ def test_filter_items_applies_balanced_digest(tmp_path: Path, monkeypatch) -> No
             )
 
     monkeypatch.setattr(
-        "src.mcp.service.make_orchestrator",
-        lambda runtime, config, storage, console, profiles: FakeOrchestrator(),
+        "src.mcp.service.HorizonOrchestrator",
+        lambda config, storage, console, profiles: FakeOrchestrator(),
     )
 
     result = asyncio.run(
@@ -386,16 +384,15 @@ def test_filter_items_matches_native_filtering_pipeline(tmp_path: Path, monkeypa
         lambda **kwargs: (
             items,
             SimpleNamespace(
-                runtime=SimpleNamespace(),
                 config_path=tmp_path / "config.json",
                 config=config,
             ),
         ),
     )
-    monkeypatch.setattr("src.mcp.service.make_storage", lambda runtime, config_path: object())
+    monkeypatch.setattr("src.mcp.service.make_storage", lambda config_path: object())
     monkeypatch.setattr(
-        "src.mcp.service.make_orchestrator",
-        lambda runtime, loaded_config, storage, console, profiles: make_filtering_orchestrator(),
+        "src.mcp.service.HorizonOrchestrator",
+        lambda loaded_config, storage, console, profiles: make_filtering_orchestrator(),
     )
 
     mcp_result = asyncio.run(service.filter_items(run_id="run-parity"))
@@ -432,6 +429,7 @@ def test_generate_summary_persists_informative_empty_summary(
             )
 
     monkeypatch.setattr(service, "_profiles", lambda ctx: PROFILES)
+    monkeypatch.setattr("src.mcp.service.DailySummarizer", RecordingSummarizer)
     service.run_store.create_run("run-empty")
     service.run_store.save_items("run-empty", "raw", [])
     service.run_store.save_items("run-empty", "filtered", [])
@@ -441,7 +439,6 @@ def test_generate_summary_persists_informative_empty_summary(
         "_build_context",
         lambda **kwargs: (
             SimpleNamespace(
-                runtime=SimpleNamespace(DailySummarizer=RecordingSummarizer),
                 config=SimpleNamespace(
                     digest=SimpleNamespace(profile_order=profile_order)
                 ),
@@ -567,7 +564,6 @@ def test_enrich_items_propagates_batch_failure(tmp_path: Path, monkeypatch) -> N
             raise RuntimeError("enrichment failed")
 
     ctx = SimpleNamespace(
-        runtime=SimpleNamespace(),
         config=SimpleNamespace(ai=SimpleNamespace(languages=["en"])),
     )
     monkeypatch.setattr(service, "_load_stage_items", lambda **kwargs: ([item], ctx))
@@ -593,7 +589,6 @@ def test_enrich_items_reports_partial_failure_truthfully(
             )
 
     ctx = SimpleNamespace(
-        runtime=SimpleNamespace(),
         config=SimpleNamespace(ai=SimpleNamespace(languages=["en"])),
     )
     monkeypatch.setattr(
@@ -631,7 +626,7 @@ def test_enrich_items_does_not_create_stage_when_all_items_fail(
                 failures={item.id: "ValueError: empty story"}
             )
 
-    ctx = SimpleNamespace(runtime=SimpleNamespace(), config=SimpleNamespace())
+    ctx = SimpleNamespace(config=SimpleNamespace())
     monkeypatch.setattr(service, "_load_stage_items", lambda **kwargs: ([item], ctx))
     monkeypatch.setattr(service, "_orchestrator", lambda loaded_ctx: FailingOrchestrator())
 

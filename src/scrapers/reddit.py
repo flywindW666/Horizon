@@ -12,7 +12,7 @@ import feedparser
 import httpx
 from bs4 import BeautifulSoup
 
-from .base import BaseScraper
+from .base import BaseScraper, FetchResult
 from ..models import (
     ContentItem,
     ProfileRoute,
@@ -52,26 +52,20 @@ class RedditScraper(BaseScraper):
         self.reddit_config = config
         self._comment_semaphore = asyncio.Semaphore(MAX_COMMENT_CONCURRENCY)
 
-    async def fetch(self, since: datetime) -> List[ContentItem]:
+    async def fetch(self, since: datetime) -> FetchResult:
+        result = FetchResult()
         if not self.config.get("enabled", True):
-            return []
+            return result
 
-        items = []
         for sub_cfg in self.reddit_config.subreddits:
             if sub_cfg.enabled:
-                try:
-                    items.extend(await self._fetch_subreddit(sub_cfg, since))
-                except Exception as e:
-                    logger.warning("Error fetching Reddit source: %s", e)
+                await result.collect(f"r/{sub_cfg.subreddit}", self._fetch_subreddit(sub_cfg, since))
 
         for user_cfg in self.reddit_config.users:
             if user_cfg.enabled:
-                try:
-                    items.extend(await self._fetch_user(user_cfg, since))
-                except Exception as e:
-                    logger.warning("Error fetching Reddit source: %s", e)
+                await result.collect(f"u/{user_cfg.username}", self._fetch_user(user_cfg, since))
 
-        return items
+        return result
 
     async def _fetch_subreddit(
         self, cfg: RedditSubredditConfig, since: datetime
@@ -120,21 +114,19 @@ class RedditScraper(BaseScraper):
     ) -> List[ContentItem]:
         rss_url = f"{REDDIT_BASE}/r/{cfg.subreddit}/{cfg.sort}/.rss"
 
-        try:
-            response = await self.client.get(
-                rss_url,
-                headers={
-                    **REDDIT_HEADERS,
-                    "Accept": "application/atom+xml,application/xml,text/xml,*/*",
-                },
-                follow_redirects=True,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as e:
-            logger.warning("Reddit RSS fallback failed for r/%s: %s", cfg.subreddit, e)
-            return []
+        response = await self.client.get(
+            rss_url,
+            headers={
+                **REDDIT_HEADERS,
+                "Accept": "application/atom+xml,application/xml,text/xml,*/*",
+            },
+            follow_redirects=True,
+        )
+        response.raise_for_status()
 
         feed = feedparser.parse(response.text)
+        if feed.bozo and not feed.entries:
+            raise ValueError("Invalid Reddit RSS feed")
         items = []
         for entry in feed.entries[: cfg.fetch_limit]:
             published_at = self._parse_rss_date(entry)
@@ -529,35 +521,20 @@ class RedditScraper(BaseScraper):
         )
 
     async def _reddit_get(self, url: str, params: dict) -> Optional[Any]:
-        try:
+        response = await self.client.get(
+            url, params=params, headers=REDDIT_HEADERS, follow_redirects=True,
+        )
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 5))
+            logger.warning("Reddit rate limited, retrying after %ds", retry_after)
+            await asyncio.sleep(retry_after)
             response = await self.client.get(
-                url,
-                params=params,
-                headers=REDDIT_HEADERS,
-                follow_redirects=True,
+                url, params=params, headers=REDDIT_HEADERS, follow_redirects=True,
             )
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 5))
-                logger.warning("Reddit rate limited, retrying after %ds", retry_after)
-                await asyncio.sleep(retry_after)
-                response = await self.client.get(
-                    url,
-                    params=params,
-                    headers=REDDIT_HEADERS,
-                    follow_redirects=True,
-                )
-            if response.status_code == 403 and "/comments/" in url:
-                logger.info(
-                    "Reddit blocked comments request for %s; continuing without comments",
-                    url,
-                )
-                return None
-            if response.status_code == 403:
-                raise RedditBlockedError(url)
-            response.raise_for_status()
-            return response.json()
-        except RedditBlockedError:
-            raise
-        except httpx.HTTPError as e:
-            logger.warning("Reddit request failed for %s: %s", url, e)
+        if response.status_code == 403 and "/comments/" in url:
+            logger.info("Reddit blocked comments request for %s; continuing without comments", url)
             return None
+        if response.status_code == 403:
+            raise RedditBlockedError(url)
+        response.raise_for_status()
+        return response.json()

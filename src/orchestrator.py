@@ -16,6 +16,7 @@ from .storage.manager import StorageManager, safe_output_path
 from .services.email import EmailManager
 from .services.webhook import WebhookNotifier
 from .services.wechat import WeChatNotifier
+from .scrapers.base import BaseScraper
 from .scrapers.github import GitHubScraper
 from .scrapers.hackernews import HackerNewsScraper
 from .scrapers.rss import RSSScraper
@@ -108,9 +109,10 @@ class SourceFetchOutcome:
     """Result of fetching one configured source."""
 
     source_name: str
-    status: Literal["success", "empty", "failure"]
+    status: Literal["success", "empty", "partial_failure", "failure"]
     items: List[ContentItem] = field(default_factory=list)
     error: Optional[str] = None
+    failures: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
         result: Dict[str, object] = {
@@ -120,6 +122,8 @@ class SourceFetchOutcome:
         }
         if self.error is not None:
             result["error"] = self.error
+        if self.failures:
+            result["failures"] = self.failures
         return result
 
 
@@ -133,7 +137,7 @@ class FetchReport:
     def status(self) -> Literal["not_attempted", "success", "partial_failure", "failure"]:
         if not self.outcomes:
             return "not_attempted"
-        if self.failed_count == len(self.outcomes):
+        if self.all_failed:
             return "failure"
         if self.failed_count:
             return "partial_failure"
@@ -141,11 +145,11 @@ class FetchReport:
 
     @property
     def failed_count(self) -> int:
-        return sum(outcome.status == "failure" for outcome in self.outcomes)
+        return sum(outcome.status in {"failure", "partial_failure"} for outcome in self.outcomes)
 
     @property
     def all_failed(self) -> bool:
-        return bool(self.outcomes) and self.failed_count == len(self.outcomes)
+        return bool(self.outcomes) and all(outcome.status == "failure" for outcome in self.outcomes)
 
     def failure_message(self) -> str:
         failures = "; ".join(
@@ -162,6 +166,7 @@ class FetchReport:
             "successful": len(self.outcomes) - self.failed_count,
             "empty": sum(outcome.status == "empty" for outcome in self.outcomes),
             "failed": self.failed_count,
+            "partial_failure": sum(outcome.status == "partial_failure" for outcome in self.outcomes),
             "item_count": sum(len(outcome.items) for outcome in self.outcomes),
             "sources": [outcome.to_dict() for outcome in self.outcomes],
         }
@@ -508,7 +513,7 @@ class HorizonOrchestrator:
             return all_items
 
     async def _fetch_with_progress(
-        self, name: str, scraper, since: datetime
+        self, name: str, scraper: BaseScraper, since: datetime
     ) -> SourceFetchOutcome:
         """Fetch from a scraper with progress indication.
 
@@ -522,7 +527,7 @@ class HorizonOrchestrator:
         """
         self.console.print(f"{self.icons['fetch']} Fetching from {name}...")
         try:
-            items = await scraper.fetch(since)
+            result = await scraper.fetch(since)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             self.console.print(f"[red]   Failed to fetch {name}: {error}[/red]")
@@ -532,7 +537,10 @@ class HorizonOrchestrator:
                 error=error,
             )
 
+        items = result.items
         self.console.print(f"   Found {len(items)} items from {name}")
+        for source, error in result.failures.items():
+            self.console.print(f"[yellow]   {name}/{source}: {error}[/yellow]")
 
         # Show per-sub-source breakdown when there are multiple sub-sources
         sub_counts: Dict[str, int] = defaultdict(int)
@@ -544,8 +552,10 @@ class HorizonOrchestrator:
 
         return SourceFetchOutcome(
             source_name=name,
-            status="success" if items else "empty",
+            status=result.status,
             items=items,
+            error="; ".join(f"{source}: {error}" for source, error in result.failures.items()) or None,
+            failures=result.failures,
         )
 
     @staticmethod
@@ -1021,7 +1031,11 @@ class HorizonOrchestrator:
             f"   Re-analyzing {len(expanded)} Twitter items with reply context...\n"
         )
         ai_client = create_ai_client(self.config.ai)
-        analyzer = ContentAnalyzer(ai_client, self.profiles, console=self.console)
+        analyzer = ContentAnalyzer(
+            ai_client, self.profiles, console=self.console,
+            concurrency=self.config.ai.analysis_concurrency,
+            throttle_sec=self.config.ai.throttle_sec,
+        )
         await analyzer.analyze_batch(expanded)
 
     async def enrich_items(self, items: List[ContentItem]) -> EnrichmentBatchResult:
@@ -1046,6 +1060,7 @@ class HorizonOrchestrator:
             self.config.ai.languages,
             console=self.console,
             tools=ToolRegistry(self.storage.summaries_dir),
+            concurrency=self.config.ai.enrichment_concurrency,
         )
         result = await enricher.enrich_batch(items)
         self.console.print(
@@ -1071,33 +1086,10 @@ class HorizonOrchestrator:
         self.console.print(f"{self.icons['ai']} Analyzing content with AI...")
 
         ai_client = create_ai_client(self.config.ai)
-        analyzer = ContentAnalyzer(ai_client, self.profiles, console=self.console)
-
-        return await analyzer.analyze_batch(items)
-
-    async def _generate_summary(
-        self,
-        items: List[ContentItem],
-        date: str,
-        total_fetched: int,
-        language: str = "en",
-    ) -> str:
-        """Generate daily summary.
-
-        Args:
-            items: Important items to include (already enriched with background/related)
-            date: Date string
-            total_fetched: Total items fetched
-            language: Output language ("en" or "zh")
-
-        Returns:
-            str: Markdown summary
-        """
-        self.console.print(f"{self.icons['summary']} Generating daily summary...")
-
-        summarizer = DailySummarizer(
-            profile_names=self.profiles.names,
-            profile_order=self.config.digest.profile_order,
+        analyzer = ContentAnalyzer(
+            ai_client, self.profiles, console=self.console,
+            concurrency=self.config.ai.analysis_concurrency,
+            throttle_sec=self.config.ai.throttle_sec,
         )
 
-        return await summarizer.generate_summary(items, date, total_fetched, language=language)
+        return await analyzer.analyze_batch(items)

@@ -38,9 +38,9 @@ def test_rss_ids_are_deterministic() -> None:
     )
     scraper = RSSScraper([source], client)
 
-    first_item = asyncio.run(scraper.fetch(_SINCE))[0]
+    first_item = asyncio.run(scraper.fetch(_SINCE)).items[0]
     first = first_item.id
-    second = asyncio.run(scraper.fetch(_SINCE))[0].id
+    second = asyncio.run(scraper.fetch(_SINCE)).items[0].id
 
     assert first == second
     assert first == "rss:example.com_feed.xml:5e2d5d1e58e94d76"
@@ -52,7 +52,7 @@ def test_timezone_less_pubdate_is_treated_as_utc() -> None:
     source = RSSSourceConfig(name="Test", url="https://example.com/feed.xml")
     scraper = RSSScraper([source], client)
 
-    items = asyncio.run(scraper.fetch(_SINCE))
+    items = asyncio.run(scraper.fetch(_SINCE)).items
 
     assert len(items) == 1
     assert items[0].published_at == datetime(
@@ -75,7 +75,7 @@ def test_content_extractor_replaces_feed_content() -> None:
         name="Test", url="https://example.com/feed.xml", content_extractor="my-ext"
     )
     scraper = RSSScraper([source], client, extractors=_make_registry("my-ext", extractor))
-    items = asyncio.run(scraper.fetch(_SINCE))
+    items = asyncio.run(scraper.fetch(_SINCE)).items
 
     assert len(items) == 1
     assert items[0].content == "Full article text from extractor."
@@ -91,7 +91,7 @@ def test_content_extractor_falls_back_on_none() -> None:
         name="Test", url="https://example.com/feed.xml", content_extractor="my-ext"
     )
     scraper = RSSScraper([source], client, extractors=_make_registry("my-ext", extractor))
-    items = asyncio.run(scraper.fetch(_SINCE))
+    items = asyncio.run(scraper.fetch(_SINCE)).items
 
     assert len(items) == 1
     assert items[0].content == "Short summary from feed."
@@ -103,7 +103,7 @@ def test_unknown_extractor_name_ignored() -> None:
         name="Test", url="https://example.com/feed.xml", content_extractor="nonexistent"
     )
     scraper = RSSScraper([source], client, extractors=_make_registry("other", AsyncMock()))
-    items = asyncio.run(scraper.fetch(_SINCE))
+    items = asyncio.run(scraper.fetch(_SINCE)).items
 
     assert len(items) == 1
     assert items[0].content == "Short summary from feed."

@@ -120,12 +120,15 @@ class ContentEnricher:
         languages: list[str],
         console: Optional[Console] = None,
         tools: Optional[ToolRegistry] = None,
+        *,
+        concurrency: int = 1,
     ):
         self.client = ai_client
         self.profiles = profiles
         self.languages = languages
         self.console = console or Console(stderr=True)
         self.tools = tools or ToolRegistry()
+        self.concurrency = max(concurrency, 1)
         self._validate_profile_tools()
 
     def _validate_profile_tools(self) -> None:
@@ -138,10 +141,6 @@ class ContentEnricher:
                         f"Profile {profile_id} block {block.id} uses unknown tools: "
                         f"{', '.join(sorted(unknown))}"
                     )
-
-    def _get_concurrency(self) -> int:
-        config = getattr(self.client, "config", None)
-        return max(getattr(config, "enrichment_concurrency", 1), 1)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10), reraise=True)
     async def _complete(self, **kwargs: Any) -> str:
@@ -179,7 +178,7 @@ class ContentEnricher:
         raise ValueError(error_message) from validation_error
 
     async def enrich_batch(self, items: list[ContentItem]) -> EnrichmentBatchResult:
-        semaphore = asyncio.Semaphore(self._get_concurrency())
+        semaphore = asyncio.Semaphore(self.concurrency)
 
         async def process(
             item: ContentItem, task_id: TaskID

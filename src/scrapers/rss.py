@@ -2,7 +2,6 @@
 
 import calendar
 import hashlib
-import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -11,12 +10,9 @@ from email.utils import parsedate_to_datetime
 import httpx
 import feedparser
 
-from .base import BaseScraper
+from .base import BaseScraper, FetchResult
 from ..extractors import ExtractorRegistry
 from ..models import ContentItem, SourceType, RSSSourceConfig
-
-logger = logging.getLogger(__name__)
-
 
 class RSSScraper(BaseScraper):
     """Scraper for RSS/Atom feeds."""
@@ -37,26 +33,25 @@ class RSSScraper(BaseScraper):
         super().__init__({"sources": sources}, http_client)
         self._extractors = extractors
 
-    async def fetch(self, since: datetime) -> List[ContentItem]:
+    async def fetch(self, since: datetime) -> FetchResult:
         """Fetch RSS feed items.
 
         Args:
             since: Only fetch items published after this time
 
         Returns:
-            List[ContentItem]: Fetched content items
+            FetchResult: Items and per-feed failures
         """
-        items = []
+        result = FetchResult()
         sources = self.config["sources"]
 
         for source in sources:
             if not source.enabled:
                 continue
 
-            feed_items = await self._fetch_feed(source, since)
-            items.extend(feed_items)
+            await result.collect(source.name, self._fetch_feed(source, since))
 
-        return items
+        return result
 
     async def _fetch_feed(
         self, source: RSSSourceConfig, since: datetime
@@ -72,67 +67,52 @@ class RSSScraper(BaseScraper):
         """
         items = []
 
-        try:
-            # Expand environment variables in URL (e.g. ${LWN_TOKEN})
-            feed_url = re.sub(
-                r"\$\{(\w+)\}",
-                lambda m: os.environ.get(m.group(1), m.group(0)).strip(),
-                str(source.url),
-            )
+        # Expand environment variables in URL (e.g. ${LWN_TOKEN})
+        feed_url = re.sub(
+            r"\$\{(\w+)\}",
+            lambda m: os.environ.get(m.group(1), m.group(0)).strip(),
+            str(source.url),
+        )
+        response = await self.client.get(feed_url, follow_redirects=True)
+        response.raise_for_status()
+        feed = feedparser.parse(response.text)
+        if feed.bozo and not feed.entries:
+            raise ValueError("Invalid RSS/Atom feed")
 
-            # Fetch feed content
-            response = await self.client.get(feed_url, follow_redirects=True)
-            response.raise_for_status()
+        for entry in feed.entries:
+            published_at = self._parse_date(entry)
+            if not published_at or published_at < since:
+                continue
 
-            # Parse feed
-            feed = feedparser.parse(response.text)
+            feed_id = str(source.url).split("//")[1].replace("/", "_")
+            entry_id = entry.get("id", entry.get("link", ""))
+            entry_hash = hashlib.sha256(str(entry_id).encode("utf-8")).hexdigest()[:16]
+            content = self._extract_content(entry)
 
-            for entry in feed.entries:
-                # Parse published date
-                published_at = self._parse_date(entry)
-                if not published_at or published_at < since:
-                    continue
+            if source.content_extractor and self._extractors:
+                extractor = self._extractors.get(source.content_extractor)
+                if extractor:
+                    url = entry.get("link", "")
+                    if url:
+                        full = await extractor.extract(url, self.client)
+                        if full:
+                            content = full
 
-                # Generate unique ID from feed URL and entry ID
-                feed_id = str(source.url).split("//")[1].replace("/", "_")
-                entry_id = entry.get("id", entry.get("link", ""))
-                entry_hash = hashlib.sha256(str(entry_id).encode("utf-8")).hexdigest()[
-                    :16
-                ]
-
-                # Extract content
-                content = self._extract_content(entry)
-
-                if source.content_extractor and self._extractors:
-                    extractor = self._extractors.get(source.content_extractor)
-                    if extractor:
-                        url = entry.get("link", "")
-                        if url:
-                            full = await extractor.extract(url, self.client)
-                            if full:
-                                content = full
-
-                item = ContentItem(
-                    id=self._generate_id("rss", feed_id, entry_hash),
-                    source_type=SourceType.RSS,
-                    title=entry.get("title", "Untitled"),
-                    url=entry.get("link", str(source.url)),
-                    content=content,
-                    author=entry.get("author", source.name),
-                    published_at=published_at,
-                    profile=source.profile,
-                    metadata={
-                        "feed_name": source.name,
-                        "category": source.category,
-                        "tags": [tag.term for tag in entry.get("tags", [])],
-                    },
-                )
-                items.append(item)
-
-        except httpx.HTTPError as e:
-            logger.warning("Error fetching RSS feed %s: %s", source.name, e)
-        except Exception as e:
-            logger.warning("Error parsing RSS feed %s: %s", source.name, e)
+            items.append(ContentItem(
+                id=self._generate_id("rss", feed_id, entry_hash),
+                source_type=SourceType.RSS,
+                title=entry.get("title", "Untitled"),
+                url=entry.get("link", str(source.url)),
+                content=content,
+                author=entry.get("author", source.name),
+                published_at=published_at,
+                profile=source.profile,
+                metadata={
+                    "feed_name": source.name,
+                    "category": source.category,
+                    "tags": [tag.term for tag in entry.get("tags", [])],
+                },
+            ))
 
         return items
 

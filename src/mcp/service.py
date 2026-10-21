@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from rich.console import Console
 
+from ..ai.summarizer import DailySummarizer
+from ..models import Config, ContentItem
+from ..orchestrator import HorizonOrchestrator
 from ..processing import ProfileRegistry
 from .errors import HorizonMcpError
 from .horizon_adapter import (
@@ -21,8 +24,7 @@ from .horizon_adapter import (
     get_source_counts,
     items_to_dicts,
     load_config,
-    load_runtime,
-    make_orchestrator,
+    load_environment,
     make_storage,
     resolve_config_path,
     resolve_horizon_path,
@@ -83,32 +85,13 @@ def _default_runs_root() -> Path:
     return Path(__file__).resolve().parents[2] / "data" / "mcp-runs"
 
 
-def _get_fetch_report(orchestrator: Any) -> dict[str, Any] | None:
-    """Return JSON-safe fetch diagnostics when supported by the runtime."""
-    report = getattr(orchestrator, "last_fetch_report", None)
-    if report is None:
-        return None
-
-    to_dict = getattr(report, "to_dict", None)
-    if isinstance(report, dict):
-        payload = report
-    elif callable(to_dict):
-        payload = to_dict()
-    elif is_dataclass(report) and not isinstance(report, type):
-        payload = asdict(cast(Any, report))
-    else:
-        payload = None
-    return payload if isinstance(payload, dict) else None
-
-
 @dataclass
 class PipelineContext:
     """Resolved execution context per call."""
 
     horizon_path: Path
     config_path: Path
-    runtime: Any
-    config: Any
+    config: Config
 
 
 class HorizonPipelineService:
@@ -318,22 +301,15 @@ class HorizonPipelineService:
             sources=sources,
         )
 
-        storage = make_storage(ctx.runtime, ctx.config_path)
-        profiles = self._profiles(ctx)
-        orchestrator = make_orchestrator(
-            ctx.runtime,
-            ctx.config,
-            storage,
-            console=self.console,
-            profiles=profiles,
-        )
+        orchestrator = self._orchestrator(ctx)
 
         run_id = self.run_store.create_run(run_id)
         since = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         raw_items = await orchestrator.fetch_all_sources(since)
         merged_items = orchestrator.merge_cross_source_duplicates(raw_items)
-        fetch_report = _get_fetch_report(orchestrator)
+        report = orchestrator.last_fetch_report
+        fetch_report = report.to_dict() if report is not None else None
 
         self.run_store.save_items(run_id, "raw", items_to_dicts(merged_items))
         meta_updates = {
@@ -554,7 +530,7 @@ class HorizonPipelineService:
         total_fetched = self._total_fetched(run_id, fallback=len(items))
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        summarizer = ctx.runtime.DailySummarizer(
+        summarizer = DailySummarizer(
             profile_names=self._profiles(ctx).names,
             profile_order=ctx.config.digest.profile_order,
         )
@@ -568,7 +544,7 @@ class HorizonPipelineService:
         run_summary_path = self.run_store.save_summary(run_id, language, summary)
         published_path = None
         if save_to_horizon_data:
-            storage = make_storage(ctx.runtime, ctx.config_path)
+            storage = make_storage(ctx.config_path)
             published_path = storage.save_daily_summary(date_str, summary, language=language)
 
         summary_meta = {
@@ -675,16 +651,15 @@ class HorizonPipelineService:
         sources: list[str] | None,
     ) -> tuple[PipelineContext, list[str], list[str]]:
         resolved_horizon = resolve_horizon_path(horizon_path)
-        runtime = load_runtime(resolved_horizon)
+        load_environment(resolved_horizon)
         resolved_config = resolve_config_path(resolved_horizon, config_path)
-        config = load_config(runtime, resolved_config)
+        config = load_config(resolved_config)
         effective_config, selected_sources, unknown_sources = apply_source_filter(config, sources)
 
         return (
             PipelineContext(
                 horizon_path=resolved_horizon,
                 config_path=resolved_config,
-                runtime=runtime,
                 config=effective_config,
             ),
             selected_sources,
@@ -697,7 +672,7 @@ class HorizonPipelineService:
         stage: str,
         horizon_path: str | None,
         config_path: str | None,
-    ) -> tuple[list[Any], PipelineContext]:
+    ) -> tuple[list[ContentItem], PipelineContext]:
         ctx, _, _ = self._build_context(horizon_path=horizon_path, config_path=config_path, sources=None)
         try:
             payload = self.run_store.load_items(run_id, stage)
@@ -707,13 +682,12 @@ class HorizonPipelineService:
                 message=f"run_id={run_id} is missing stage artifact: {stage}",
                 details={"run_id": run_id, "stage": stage},
             ) from exc
-        items = dicts_to_items(ctx.runtime, payload)
+        items = dicts_to_items(payload)
         return items, ctx
 
-    def _orchestrator(self, ctx: PipelineContext) -> Any:
-        storage = make_storage(ctx.runtime, ctx.config_path)
-        return make_orchestrator(
-            ctx.runtime,
+    def _orchestrator(self, ctx: PipelineContext) -> HorizonOrchestrator:
+        storage = make_storage(ctx.config_path)
+        return HorizonOrchestrator(
             ctx.config,
             storage,
             console=self.console,
@@ -746,7 +720,7 @@ class HorizonPipelineService:
         )
 
     @staticmethod
-    def _score_distribution(items: list[Any]) -> dict[str, int]:
+    def _score_distribution(items: list[ContentItem]) -> dict[str, int]:
         buckets = {"unscored": 0, "0-2": 0, "3-4": 0, "5-6": 0, "7-8": 0, "9-10": 0}
         for item in items:
             analysis = item.processing.analysis if item.processing else None
